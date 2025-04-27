@@ -1,11 +1,14 @@
 # TRMNL Display
 
+
+This is a modified version of the BYOD code on raspberry PI for e-Paper display. 
+
 TRMNL Display is a lightweight, terminal-based application designed to display dynamic images directly on framebuffer-enabled devices, such as Raspberry Pi. It fetches images from the TRMNL API and renders them directly to the framebuffer, providing a seamless display experience without requiring a traditional desktop environment.
 
 ## Features
 
 - Direct framebuffer image rendering.
-- Supports JPEG, PNG, and BMP image formats.
+- Supports JPEG, PNG, and BMP image formats. ?? Depends on 
 - Custom handling for BMP images, including 1-bit BMPs with dark mode inversion.
 - Configurable refresh rates.
 - Easy configuration through environment variables or interactive prompts.
@@ -16,6 +19,29 @@ TRMNL Display is a lightweight, terminal-based application designed to display d
 - Go 1.19 or higher
 - Framebuffer-enabled Linux device (e.g., Raspberry Pi)
 - Internet connection for fetching images
+
+- Install imagemagick on PI (required for image conversion) 
+
+```
+sudo apt-get install imagemagick
+```
+
+# Create a script the takes an image file and displays it to e-Paper display
+
+Rather than build this into the go code, the code calls out to a script that takes the downloaded image and displays it to a screen.
+
+My script takes the image, converts it to a 24bit bitmap (since my e-Paper is a 7 colour display)
+
+Example script
+```
+convert -depth 24 -type truecolor $1 $1_24bit.bmp
+sudo epd $1_24bit.bmp
+```
+
+Example script on mac
+```
+qlmanage -p $1
+```
 
 ## Installation
 

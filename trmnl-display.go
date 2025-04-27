@@ -1,33 +1,27 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"image"
 	"image/color"
-	"image/draw"
 	_ "image/jpeg" // Register JPEG decoder
 	_ "image/png"  // Register PNG decoder
 	"io"
-	"io/ioutil"
 	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
-	"os/user"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
-	"unsafe"
 
 	_ "golang.org/x/image/bmp" // Register BMP decoder
-
-	imagedraw "golang.org/x/image/draw"
-
-	"github.com/gonutz/framebuffer"
+	// "github.com/gonutz/framebuffer"
 )
 
 // Version information
@@ -51,8 +45,10 @@ type Config struct {
 
 // AppOptions holds command line options
 type AppOptions struct {
-	DarkMode bool
-	Verbose  bool
+	DarkMode          bool
+	Verbose           bool
+	ConfigPath        string
+	DisplayScriptPath string
 }
 
 // FramebufferLock represents the lock file structure
@@ -67,58 +63,58 @@ var fbLock *FramebufferLock
 // Add this new function to disable the cursor
 func disableCursor() error {
 	// Method 1: Using the terminal settings
-	termios := syscall.Termios{
-		Iflag: 0,
-		Oflag: 0,
-		Cflag: 0,
-		Lflag: 0,
-	}
+	// termios := syscall.Termios{
+	// 	Iflag: 0,
+	// 	Oflag: 0,
+	// 	Cflag: 0,
+	// 	Lflag: 0,
+	// }
 
-	tty, err := os.OpenFile("/dev/tty1", os.O_RDWR, 0)
-	if err != nil {
-		return fmt.Errorf("error opening /dev/tty1: %v", err)
-	}
-	defer tty.Close()
+	// tty, err := os.OpenFile("/dev/tty1", os.O_RDWR, 0)
+	// if err != nil {
+	// 	return fmt.Errorf("error opening /dev/tty1: %v", err)
+	// }
+	// defer tty.Close()
 
-	_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, tty.Fd(), uintptr(syscall.TCSETS), uintptr(unsafe.Pointer(&termios)))
-	if errno != 0 {
-		return fmt.Errorf("ioctl error: %v", errno)
-	}
+	// _, _, errno := syscall.Syscall(syscall.SYS_IOCTL, tty.Fd(), uintptr(syscall.TCSETS), uintptr(unsafe.Pointer(&termios)))
+	// if errno != 0 {
+	// 	return fmt.Errorf("ioctl error: %v", errno)
+	// }
 
-	// Method 2: Try to disable the cursor via escape sequence
-	_, err = tty.Write([]byte("\033[?25l"))
-	if err != nil {
-		return fmt.Errorf("error writing escape sequence: %v", err)
-	}
+	// // Method 2: Try to disable the cursor via escape sequence
+	// _, err = tty.Write([]byte("\033[?25l"))
+	// if err != nil {
+	// 	return fmt.Errorf("error writing escape sequence: %v", err)
+	// }
 
-	// Method 3: Use the console blinking cursor control
-	err = ioutil.WriteFile("/sys/class/graphics/fbcon/cursor_blink", []byte("0"), 0644)
-	if err != nil {
-		fmt.Printf("Warning: Failed to disable cursor blink via sysfs: %v\n", err)
-		// Not returning error as this is optional
-	}
+	// // Method 3: Use the console blinking cursor control
+	// err = ioutil.WriteFile("/sys/class/graphics/fbcon/cursor_blink", []byte("0"), 0644)
+	// if err != nil {
+	// 	fmt.Printf("Warning: Failed to disable cursor blink via sysfs: %v\n", err)
+	// 	// Not returning error as this is optional
+	// }
 
-	// Method 4: Try to disable GPM mouse daemon if running
-	if _, err := os.Stat("/var/run/gpm.pid"); err == nil {
-		fmt.Println("GPM mouse daemon detected, attempting to disable it...")
-		exec.Command("sudo", "service", "gpm", "stop").Run()
-	}
+	// // Method 4: Try to disable GPM mouse daemon if running
+	// if _, err := os.Stat("/var/run/gpm.pid"); err == nil {
+	// 	fmt.Println("GPM mouse daemon detected, attempting to disable it...")
+	// 	exec.Command("sudo", "service", "gpm", "stop").Run()
+	// }
 
 	return nil
 }
 
 func restoreCursor() {
-	tty, err := os.OpenFile("/dev/tty1", os.O_RDWR, 0)
-	if err != nil {
-		return
-	}
-	defer tty.Close()
+	// tty, err := os.OpenFile("/dev/tty1", os.O_RDWR, 0)
+	// if err != nil {
+	// 	return
+	// }
+	// defer tty.Close()
 
-	// Re-enable cursor
-	tty.Write([]byte("\033[?25h"))
+	// // Re-enable cursor
+	// tty.Write([]byte("\033[?25h"))
 
-	// Re-enable cursor blink
-	ioutil.WriteFile("/sys/class/graphics/fbcon/cursor_blink", []byte("1"), 0644)
+	// // Re-enable cursor blink
+	// ioutil.WriteFile("/sys/class/graphics/fbcon/cursor_blink", []byte("1"), 0644)
 }
 
 func main() {
@@ -129,7 +125,7 @@ func main() {
 	options := parseCommandLineArgs()
 
 	// Set up signal handling for clean exit
-	setupSignalHandling()
+	// setupSignalHandling()
 
 	// Check the environment first
 	if options.Verbose {
@@ -148,14 +144,21 @@ func main() {
 		os.Exit(1)
 	}
 	configDir = filepath.Join(configDir, ".trmnl")
-	err = os.MkdirAll(configDir, 0755)
-	if err != nil {
-		fmt.Printf("Error creating config directory: %v\n", err)
-		os.Exit(1)
+
+	// Use custom config path if provided
+	config := Config{}
+	if options.ConfigPath != "" {
+		config = loadConfigFromPath(options.ConfigPath)
+	} else {
+		err = os.MkdirAll(configDir, 0755)
+		if err != nil {
+			fmt.Printf("Error creating config directory: %v\n", err)
+			os.Exit(1)
+		}
+		config = loadConfig(configDir)
 	}
 
 	// Get API key from environment, or from config file
-	config := loadConfig(configDir)
 	if config.APIKey == "" {
 		config.APIKey = os.Getenv("TRMNL_API_KEY")
 	}
@@ -177,13 +180,13 @@ func main() {
 	defer os.RemoveAll(tmpDir)
 
 	// Create and acquire framebuffer lock
-	fbLock = NewFramebufferLock("/var/lock/trmnl-display.lock")
-	err = fbLock.Acquire()
-	if err != nil {
-		fmt.Printf("Error acquiring framebuffer lock: %v\n", err)
-		os.Exit(1)
-	}
-	defer fbLock.Release()
+	// fbLock = NewFramebufferLock("/var/lock/trmnl-display.lock")
+	// err = fbLock.Acquire()
+	// if err != nil {
+	// 	fmt.Printf("Error acquiring framebuffer lock: %v\n", err)
+	// 	os.Exit(1)
+	// }
+	// defer fbLock.Release()
 
 	// Disable cursor
 	if err := disableCursor(); err != nil {
@@ -305,40 +308,40 @@ func setupSignalHandling() {
 
 // clearFramebuffer fills the framebuffer with black to clear it
 func clearFramebuffer() {
-	fmt.Println("Clearing framebuffer...")
+	// fmt.Println("Clearing framebuffer...")
 
-	fb, err := framebuffer.Open("/dev/fb0")
-	if err != nil {
-		fmt.Printf("Error opening framebuffer to clear: %v\n", err)
-		return
-	}
-	defer fb.Close()
+	// fb, err := framebuffer.Open("/dev/fb0")
+	// if err != nil {
+	// 	fmt.Printf("Error opening framebuffer to clear: %v\n", err)
+	// 	return
+	// }
+	// defer fb.Close()
 
-	// Create a black image
-	black := image.NewRGBA(fb.Bounds())
-	draw.Draw(fb, fb.Bounds(), black, image.Point{}, draw.Src)
+	// // Create a black image
+	// black := image.NewRGBA(fb.Bounds())
+	// draw.Draw(fb, fb.Bounds(), black, image.Point{}, draw.Src)
 
-	// Flush the framebuffer if necessary
-	if fbFlusher, ok := interface{}(fb).(interface{ Flush() error }); ok {
-		fbFlusher.Flush()
-	}
+	// // Flush the framebuffer if necessary
+	// if fbFlusher, ok := interface{}(fb).(interface{ Flush() error }); ok {
+	// 	fbFlusher.Flush()
+	// }
 }
 
 // checkRoot verifies if the program is running with root privileges
 func checkRoot() {
-	currentUser, err := user.Current()
-	if err != nil {
-		fmt.Printf("Error determining current user: %v\n", err)
-		os.Exit(1)
-	}
+	// currentUser, err := user.Current()
+	// if err != nil {
+	// 	fmt.Printf("Error determining current user: %v\n", err)
+	// 	os.Exit(1)
+	// }
 
-	if currentUser.Uid != "0" {
-		fmt.Println("This program requires root privileges to access the framebuffer.")
-		fmt.Println("Please run with sudo or as root.")
-		os.Exit(1)
-	}
+	// if currentUser.Uid != "0" {
+	// 	fmt.Println("This program requires root privileges to access the framebuffer.")
+	// 	fmt.Println("Please run with sudo or as root.")
+	// 	os.Exit(1)
+	// }
 
-	fmt.Println("Running with root privileges ✓")
+	// fmt.Println("Running with root privileges ✓")
 }
 
 // parseCommandLineArgs parses command line arguments and returns app options
@@ -347,6 +350,8 @@ func parseCommandLineArgs() AppOptions {
 	showVersion := flag.Bool("v", false, "Show version information")
 	verbose := flag.Bool("verbose", true, "Enable verbose output")
 	quiet := flag.Bool("q", false, "Quiet mode (disable verbose output)")
+	configPath := flag.String("c", "", "Path to config file (default: ~/.trmnl/config.json)")
+	displayScriptPath := flag.String("s", "", "Path to script to display image (default: ~/bin/epd)")
 	flag.Parse()
 
 	if *showVersion {
@@ -356,8 +361,10 @@ func parseCommandLineArgs() AppOptions {
 	}
 
 	return AppOptions{
-		DarkMode: *darkMode,
-		Verbose:  *verbose && !*quiet,
+		DarkMode:          *darkMode,
+		Verbose:           *verbose && !*quiet,
+		ConfigPath:        *configPath,
+		DisplayScriptPath: *displayScriptPath,
 	}
 }
 
@@ -401,7 +408,18 @@ func processNextImage(tmpDir, apiKey string, options AppOptions) {
 
 	// Parse the JSON response
 	var terminal TerminalResponse
-	decoder := json.NewDecoder(resp.Body)
+
+	// Read the response body into a string
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		fmt.Printf("Error reading response body: %v\n", err)
+		time.Sleep(60 * time.Second)
+		return
+	}
+	fmt.Printf("Response body: %s\n", string(bodyBytes))
+
+	// Create a new reader with the body bytes for the decoder
+	decoder := json.NewDecoder(bytes.NewReader(bodyBytes))
 	if err := decoder.Decode(&terminal); err != nil {
 		fmt.Printf("Error parsing JSON: %v\n", err)
 		time.Sleep(60 * time.Second)
@@ -416,6 +434,10 @@ func processNextImage(tmpDir, apiKey string, options AppOptions) {
 
 	// Create full path to temporary file
 	filePath := filepath.Join(tmpDir, filename)
+	// if filePath does not end in .bmp, add it
+	if !strings.HasSuffix(filePath, ".bmp") {
+		filePath = filePath + ".bmp"
+	}
 
 	// Download the image
 	imgResp, err := http.Get(terminal.ImageURL)
@@ -459,97 +481,109 @@ func processNextImage(tmpDir, apiKey string, options AppOptions) {
 	}
 
 	// Sleep for the refresh rate
+	fmt.Printf("Sleeping for %d seconds\n", refreshRate)
 	time.Sleep(time.Duration(refreshRate) * time.Second)
 }
 
 func displayImage(imagePath string, options AppOptions) error {
-	// Open the image file
-	file, err := os.Open(imagePath)
+
+	fmt.Printf("Displaying image: %s\n", imagePath)
+	// Display the image using qlmanage -p 7in3f3.bmp
+	cmd := exec.Command(options.DisplayScriptPath, imagePath)
+	err := cmd.Run()
 	if err != nil {
-		return fmt.Errorf("error opening image file: %v", err)
-	}
-	defer file.Close()
-
-	if options.Verbose {
-		fmt.Printf("Reading image from %s\n", imagePath)
+		return fmt.Errorf("error displaying image: %v", err)
 	}
 
-	// Get image format
-	format, err := getImageFormat(file)
-	if err != nil {
-		return fmt.Errorf("error determining image format: %v", err)
-	}
-	if options.Verbose {
-		fmt.Printf("Detected image format: %s\n", format)
-	}
-
-	// Reset file position after checking format
-	file.Seek(0, 0)
-
-	var img image.Image
-	// Try standard decoding first
-	img, format, err = image.Decode(file)
-	// If standard decoding fails for BMP, try our custom decoder
-	if err != nil && format == "bmp" {
-		if options.Verbose {
-			fmt.Printf("Standard BMP decoder failed: %v\n", err)
-			fmt.Printf("Trying custom BMP decoder...\n")
-		}
-		file.Seek(0, 0)
-		img, err = decodeCustomBMP(file, options.DarkMode)
-		if err != nil {
-			return fmt.Errorf("both standard and custom BMP decoders failed: %v", err)
-		}
-		if options.Verbose {
-			fmt.Printf("Successfully decoded image with custom BMP decoder\n")
-		}
-	} else if err != nil {
-		return fmt.Errorf("error decoding image format '%s': %v", format, err)
-	} else if options.Verbose {
-		fmt.Printf("Successfully decoded image as %s\n", format)
-	}
-
-	// Verify we still have the lock before proceeding
-	if fbLock != nil && !fbLock.Acquired {
-		return fmt.Errorf("lost framebuffer lock, cannot continue")
-	}
-
-	// Switch to tty1 so the framebuffer becomes active
-	err = exec.Command("chvt", "1").Run()
-	if err != nil {
-		fmt.Printf("Error switching VT to tty1: %v\n", err)
-	}
-
-	// Open the framebuffer
-	fb, err := framebuffer.Open("/dev/fb0")
-	if err != nil {
-		return fmt.Errorf("error opening framebuffer: %v", err)
-	}
-	defer fb.Close()
-
-	// Get framebuffer bounds
-	fbBounds := fb.Bounds()
-	if options.Verbose {
-		fmt.Printf("Framebuffer bounds: %v\n", fbBounds)
-	}
-
-	// Scale the image to fill the entire framebuffer
-	targetRect := fbBounds
-	scaledImg := image.NewRGBA(targetRect)
-	imagedraw.NearestNeighbor.Scale(scaledImg, targetRect, img, img.Bounds(), imagedraw.Over, nil)
-
-	// Draw the scaled image to the framebuffer
-	draw.Draw(fb, targetRect, scaledImg, image.Point{}, draw.Src)
-
-	// Flush the framebuffer if necessary
-	if fbFlusher, ok := interface{}(fb).(interface{ Flush() error }); ok {
-		fbFlusher.Flush()
-	}
-
-	if options.Verbose {
-		fmt.Println("Image drawing completed (full screen)")
-	}
 	return nil
+
+	// Open the image file
+	// file, err := os.Open(imagePath)
+	// if err != nil {
+	// 	return fmt.Errorf("error opening image file: %v", err)
+	// }
+	// defer file.Close()
+
+	// if options.Verbose {
+	// 	fmt.Printf("Reading image from %s\n", imagePath)
+	// }
+
+	// // Get image format
+	// format, err := getImageFormat(file)
+	// if err != nil {
+	// 	return fmt.Errorf("error determining image format: %v", err)
+	// }
+	// if options.Verbose {
+	// 	fmt.Printf("Detected image format: %s\n", format)
+	// }
+
+	// // Reset file position after checking format
+	// file.Seek(0, 0)
+
+	// var img image.Image
+	// // Try standard decoding first
+	// img, format, err = image.Decode(file)
+	// // If standard decoding fails for BMP, try our custom decoder
+	// if err != nil && format == "bmp" {
+	// 	if options.Verbose {
+	// 		fmt.Printf("Standard BMP decoder failed: %v\n", err)
+	// 		fmt.Printf("Trying custom BMP decoder...\n")
+	// 	}
+	// 	file.Seek(0, 0)
+	// 	img, err = decodeCustomBMP(file, options.DarkMode)
+	// 	if err != nil {
+	// 		return fmt.Errorf("both standard and custom BMP decoders failed: %v", err)
+	// 	}
+	// 	if options.Verbose {
+	// 		fmt.Printf("Successfully decoded image with custom BMP decoder\n")
+	// 	}
+	// } else if err != nil {
+	// 	return fmt.Errorf("error decoding image format '%s': %v", format, err)
+	// } else if options.Verbose {
+	// 	fmt.Printf("Successfully decoded image as %s\n", format)
+	// }
+
+	// // Verify we still have the lock before proceeding
+	// if fbLock != nil && !fbLock.Acquired {
+	// 	return fmt.Errorf("lost framebuffer lock, cannot continue")
+	// }
+
+	// // Switch to tty1 so the framebuffer becomes active
+	// err = exec.Command("chvt", "1").Run()
+	// if err != nil {
+	// 	fmt.Printf("Error switching VT to tty1: %v\n", err)
+	// }
+
+	// // Open the framebuffer
+	// fb, err := framebuffer.Open("/dev/fb0")
+	// if err != nil {
+	// 	return fmt.Errorf("error opening framebuffer: %v", err)
+	// }
+	// defer fb.Close()
+
+	// // Get framebuffer bounds
+	// fbBounds := fb.Bounds()
+	// if options.Verbose {
+	// 	fmt.Printf("Framebuffer bounds: %v\n", fbBounds)
+	// }
+
+	// // Scale the image to fill the entire framebuffer
+	// targetRect := fbBounds
+	// scaledImg := image.NewRGBA(targetRect)
+	// imagedraw.NearestNeighbor.Scale(scaledImg, targetRect, img, img.Bounds(), imagedraw.Over, nil)
+
+	// // Draw the scaled image to the framebuffer
+	// draw.Draw(fb, targetRect, scaledImg, image.Point{}, draw.Src)
+
+	// // Flush the framebuffer if necessary
+	// if fbFlusher, ok := interface{}(fb).(interface{ Flush() error }); ok {
+	// 	fbFlusher.Flush()
+	// }
+
+	// if options.Verbose {
+	// 	fmt.Println("Image drawing completed (full screen)")
+	// }
+	// return nil
 }
 
 // decodeCustomBMP attempts to decode a BMP file using a simplified approach
@@ -793,4 +827,20 @@ func listFramebufferDevices() {
 		return
 	}
 	fmt.Printf("Found framebuffer devices: %v\n", files)
+}
+
+// Add new function to load config from custom path
+func loadConfigFromPath(path string) Config {
+	config := Config{}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		fmt.Printf("Error reading config file %s: %v\n", path, err)
+		return config
+	}
+
+	err = json.Unmarshal(data, &config)
+	if err != nil {
+		fmt.Printf("Error parsing config file %s: %v\n", path, err)
+	}
+	return config
 }
